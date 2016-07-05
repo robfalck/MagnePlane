@@ -106,6 +106,18 @@ class MagneplaneTestStraightTrack(unittest.TestCase):
         self.prob.setup()
         self.prob.run()
 
+        print(self.prob['traj0.phase0.rhs_c.x'])
+        print(self.prob['traj0.phase0.rhs_c.y'])
+        print(self.prob['traj0.phase0.rhs_c.lat'])
+        print(self.prob['traj0.phase0.rhs_c.long'])
+        print(self.prob['traj0.phase0.rhs_c.elev'])
+
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.plot( self.prob['traj0.phase0.rhs_c.lat'], self.prob['traj0.phase0.rhs_c.long'],'ko')
+        plt.show()
+
         np.testing.assert_almost_equal(self.prob['traj0.phase0.rhs_c.t'][-1],
                                        35.09879341,
                                        decimal=3)
