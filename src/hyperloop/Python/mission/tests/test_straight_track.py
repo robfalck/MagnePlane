@@ -156,3 +156,8 @@ class MagneplaneTestStraightTrack(unittest.TestCase):
         #          self.prob["traj0.phase0.rhs_i.v"],"rx")
         # plt.plot(results["t"],results["v"],"b-")
         # plt.show()
+
+
+
+if __name__ == '__main__':
+    unittest.main()

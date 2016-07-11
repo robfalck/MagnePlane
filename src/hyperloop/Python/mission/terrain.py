@@ -35,13 +35,13 @@ class TerrainElevationComp(EOMComp):
 
         self.interpolant = interpolate.RectBivariateSpline(usgs_file['Longitude'], usgs_file['Latitude'], usgs_file['Elevation'])
 
-        import matplotlib.pyplot as plt
-
-        xx = usgs_file['XX']
-        yy = usgs_file['YY']
-        zz = usgs_file['Elevation']
-
-        plt.contourf(xx,yy,zz)
+        # import matplotlib.pyplot as plt
+        #
+        # xx = usgs_file['XX']
+        # yy = usgs_file['YY']
+        # zz = usgs_file['Elevation']
+        #
+        # plt.contourf(xx,yy,zz)
         #
         # min_lon, max_lon = usgs_file['YY'][0,0], usgs_file['YY'][479,479]
         # min_lat, max_lat = usgs_file['XX'][0,0], usgs_file['XX'][479,479]
@@ -72,18 +72,14 @@ class TerrainElevationComp(EOMComp):
         # plt.contourf(lons,lats,zz)
         # plt.show()
 
-
-
-
-
     def solve_nonlinear(self, params, unknowns, resids):
         #convert x/y to lat/lon (see Component lat_long.py), then feed into interpolant
         elev = unknowns['elev']
 
         for i in range(self.num_nodes):
             elev[i] = self.interpolant(params['long'][i],params['lat'][i])
+        unknowns['alt'] = params['z'] - unknowns['elev']
 
-        #unknowns['alt'] = -params['z'] - unknowns['elev']
 
 if __name__ == "__main__":
     root = Group()

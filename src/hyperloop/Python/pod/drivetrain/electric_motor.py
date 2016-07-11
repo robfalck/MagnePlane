@@ -4,74 +4,280 @@ Calculates Phase Current, Phase Voltage, Frequency, Motor Size, and Weight.
 """
 from __future__ import print_function
 
-import numpy
-from openmdao.api import Component, Problem, Group
+import numpy as np
+from openmdao.api import Component, Problem, Group, Newton, IndepVarComp, ScipyGMRES
 
 
-class ElectricMotor(Component):
+class MotorBalance(Component):
+    """Creates an implicit connection between the
     """
+
+    def __init__(self):
+        super(MotorBalance, self).__init__()
+        self.deriv_options['type'] = 'fd'
+        self.add_state('I0',
+                       val=40.0,
+                       desc='motor no load current',
+                       units='A',
+                       lower=0.0,
+                       upper=1000.0)
+        self.add_param('power_input',
+                       0.0,
+                       desc='total power input into motor',
+                       units='W')
+        self.add_param('current', val=2.0, desc='total current through motor', units='A')
+        self.add_param('voltage', val=500.0, desc='total voltage through motor', units='V')
+
+    def solve_nonlinear(self, params, unknowns, resids):
+        pass
+
+    def apply_nonlinear(self, params, unknowns, resids):
+        resids['I0'] = (params['current'] * params['voltage'] - params['power_input']) / 1000
+        # print('current %f' % params['current'])
+        # print('voltage %f' % params['voltage'])
+        # print('I0: %f' % unknowns['I0'])
+        # print('resid: %f' % resids['I0'])
+        # print('power_input: %f' % params['power_input'])
+
+
+class MotorGroup(Group):
+    def __init__(self):
+        super(MotorGroup, self).__init__()
+
+        self.add('Motor', Motor(), promotes=['*'])
+        self.add('MotorSize', MotorSize(), promotes=['*'])
+        self.add('MotorBalance', MotorBalance(), promotes=['power_input', 'current', 'voltage'])
+        self.connect('MotorSolver.I0', 'I0')
+
+        self.nl_solver = Newton()
+        self.nl_solver.options['maxiter'] = 1000
+        self.nl_solver.options['atol'] = 5.0e-5
+
+        self.ln_solver = ScipyGMRES()
+        self.ln_solver.options['maxiter'] = 100
+
+
+class MotorSize(Component):
+    """
+    Parameters
+    ----------
+    max_rpm : float
+        maximum rotational speed of motor (RPM)
+    design_power : float
+        desired design value for motor power (W)
+    max_current : float
+        max motor phase current (A)
+    n_phases : float
+        number of motor phases (unitless)
+    speed : float
+        desired output shaft mechanical speed (RPM)
+    kappa : float
+        ratio of base speed to max speed (unitless)
+    L_D_ratio : float
+        length to diameter ratio of motor (unitless)
+
+    Outputs
+    -------
+    D2L : float
+        D-squared*L parameter which is proportional to Torque (mm^3)
+    d_base : float
+        base 8000hp diameter for scaling purposes (m)
+    mass : float
+        mass of motor (kg)
+    l_base : float
+        motor length (m)
+    w_base : float
+        base speed of motor (rad/s)
+    max_torque : float
+        maximum possible torque for motor (N*m)
+    power_iron_loss : float
+        total power loss due to iron core (W)
+    power_mech : float
+        mechanical power output of motor (W)
+    power_windage_loss : float
+        friction loss from motor operation (W)
+    winding_resistance : float
+        total resistance of copper winding (ohm)
+    torque : float
+        torque at max rpm (N*m)
+    w_operating : float
+        operating speed of motor (rad/s)
+    """
+    def __init__(self):
+        super(MotorSize, self).__init__()
+        self.deriv_options['type'] = 'fd'
+
+        self.add_param('max_current',
+                       val=42.0,
+                       desc='max motor phase current',
+                       units='A')
+        self.add_param('speed', val=2000.0, desc='desired output shaft mechanical speed', units='RPM')
+        self.add_param('L_D_ratio',
+                       val=0.822727,
+                       desc='length to diameter ratio of motor',
+                       units='unitless')
+        self.add_param('max_rpm',
+                       val=3500.0,
+                       desc='maximum rotational speed of motor',
+                       units='RPM')
+        self.add_param('design_power',
+                       val=0.394 * 746,
+                       desc='desired design value for motor power',
+                       units='W')
+        self.add_param('n_phases',
+                       val=3.0,
+                       desc='number of motor power phases',
+                       units='unitless')
+        self.add_param('kappa',
+                       val=1 / 1.75,
+                       desc='ratio of base speed to max speed',
+                       units='unitless')
+        self.add_output('d_base',
+                        val=0.48,
+                        desc='base 8000hp diameter for scaling purposes in m',
+                        units='m')
+        self.add_output('l_base',
+                        val=0.4,
+                        desc='motor length',
+                        units='m')
+        self.add_output('mass', val=0.0, desc='mass of motor', units='kg')
+        self.add_output('max_torque', val=0.0, desc='maximum possible torque for motor', units='N*m')
+        self.add_output('torque', val=1000.0, desc='torque at max_rpm', units='N*m')
+        self.add_output('w_base', val=3000.0, desc=' base speed of motor ', units='rad/s')
+        self.add_output('D2L', val=1.0, desc='D-squared*L parameter which is proportional to Torque', units='mm^3')
+        self.add_output('power_mech', 0.0, desc='mechanical power output of motor',  units='W')
+        self.add_output('w_operating', 0.0, desc='operating speed of motor', units='rad/s')
+        self.add_output('power_iron_loss', 0.0, desc='total power loss due to iron core', units='W')
+        self.add_output('winding_resistance', 0.0, desc='total resistance of copper winding', units='ohm')
+        self.add_output('power_windage_loss', 0.0, desc='friction loss from motor operation', units='W')
+
+    def solve_nonlinear(self, params, unknowns, resids):
+        # calc max torque, rotational velocity, power
+        w_max = params['max_rpm'] * 2.0 * np.pi / 60.0  # rad/sec
+        unknowns['w_base'] = params['kappa'] * w_max
+        unknowns['max_torque'] = params['design_power'] / unknowns['w_base']
+        unknowns['torque'] = params['design_power'] / w_max
+        unknowns['power_mech'] = unknowns['w_operating'] * unknowns['torque']
+        unknowns['w_operating'] = params['speed'] * 2 * np.pi / 60.0
+
+        # calc loss parameters
+        unknowns['power_iron_loss'] = self.calculate_iron_loss(unknowns['d_base'], params['speed'], unknowns['l_base'])
+        unknowns['winding_resistance'] = self.calculate_copper_loss(unknowns['d_base'], params['max_current'], params['n_phases'])
+        unknowns['power_windage_loss'] = self.calculate_windage_loss(unknowns['w_operating'], unknowns['d_base'], unknowns['l_base'])
+       
+        # calc size
+        unknowns['D2L'] = 293722.0 * np.power(unknowns['max_torque'], 0.7592)  # mm^3
+        unknowns['d_base'] = np.power(unknowns['D2L'] / params['L_D_ratio'], 1.0 / 3.0) / 1000.0  # m
+        unknowns['l_base'] = unknowns['d_base'] * params['L_D_ratio']  # m
+
+        unknowns['mass'] = 0.0000070646 * np.power(unknowns['D2L'], 0.9386912061)  # kg, relation in GT paper (Figure 6)
+
+    def calculate_windage_loss(self, w_operating, d_base, l_base):
+        return 0
+    #      # calc Reynolds number losses
+    #      Re = np.power(d_base, 2.0) / 4.0 * w_operating / 2.075e-5 * 0.05
+    #      c_friction = 0.01
+    #      
+    #      # TODO no nested loop
+    #      # while (abs(diff) > 0.001):
+    #      #     Cd = 1.0 / np.power(2.04+1.768*np.log(Re*np.power(c_friction, 0.5)), 2.0)
+    #      #     diff = (Cd - c_friction) / Cd
+    #      #     c_friction = Cd
+    #     
+    #      # calculate cylinder loss
+    #      P_windage_cylinder_loss = c_friction * np.pi * np.power(w_operating, 3.0) * np.power(
+    #          d_base / 2.0, 4.0) * l_base * 1.2041
+    #      # calculate cylinder face loss
+    #      Re_r = np.power(d_base, 2.0) / 4.0 * w_operating / 2.075e-5
+    #      c_disk_friction = 0.08 / np.power(0.05, 0.167) / np.power(Re, 0.25)
+    #      P_windage_face_loss = 0.5 * c_friction * 1.2041 * np.power(w_operating, 3.0) * np.power(
+    #          d_base / 2.0, 5.0) * (1.0 - np.power(core_radius_ratio, 5.0))
+    #      # P_windage_total_loss = P_windage_face_loss + P_windage_face_loss
+    #      P_windage_total_loss = 0
+
+    def calculate_copper_loss(self, d_base, max_current, n_phases):
+        # D-axis resistance per motor phase at very high-speed (short-cruit)
+        Rd = 0.0
+
+        # calc static loading factor from GT paper
+        As = 688.7 * max_current
+
+        # calc total resistance in winding
+        n_coil_turns = As * np.pi * d_base / max_current / n_phases / 2.0
+        resistance_per_km_per_turn = 48.8387296964863 * np.power(max_current, -1.00112597971171)
+        winding_len = d_base * 3.14159
+        resistance_per_turn = resistance_per_km_per_turn * winding_len / 1000.
+        return resistance_per_turn * n_coil_turns * n_phases
+
+    def calculate_iron_loss(self, d_base, speed, l_base):
+        pole_pairs = 6.0
+        stator_core_density = 7650.0  # kg/m^3
+        core_radius_ratio = 0  # r_inner / r_outter
+        # hysteresis loss constant
+        Kh = 0.0275  # W/(kg T^2 Hz)
+        # iron eddy loss constant
+        Kc = 1.83e-5  # W/(kg T^2 Hz^2)
+        # correction factor
+        Ke = 2.77e-5  # W/(kg T^1.5 Hz^1.5)
+        # stator magnetic flux density
+        Bp = 1.22  # T
+
+        # iron losses
+        freq = speed * pole_pairs / 60.0
+        volume_iron = np.pi * l_base * np.power(d_base / 2.0, 2.0) * (
+            1.0 - np.power(core_radius_ratio, 2.0))
+        iron_core_mass = stator_core_density * volume_iron
+        power_iron_loss = (Kh * np.power(Bp, 2.0) * freq + Kc * np.power(Bp * freq, 2.0) + Ke * np.power(Bp * freq, 1.5)) * iron_core_mass
+        return power_iron_loss
+
+
+class Motor(Component):
+    """ Represents an electric motor which can calculate output current and voltage
+    based on motor sizing parameters and losses. Used in conjunction with MotorBalance
+    to find the correct no load current for this Motor
+
+    Based on work done by Gladin et. al. ([1]_)
+
     Params
     ------
+    w_operating : float
+        operating speed of motor (rad/s)
     torque : float
-        Output Torque from motor in N*m. Default value is 1000.0
-    max_rpm : float
-        Maximum rotational speed of motor in RPM. Default value is 4600.0
-    design_power : float
-        Desired design value for motor power in hp. Default value is 0.0
-    speed : float
-        Output shaft mechanical speed in RPM. Default value is 1000.0
-    POLE_PAIRS : float
-        Number of pole pairs in motor. Default value is 6.0
-    i0 : float
-        Motor No-load current in Amps. Default value is 0.0
-    i0_des : float
-        Motor No-load Current at Nbase in Amps. Default value is 0.0
-    imax : float
-        Max motor phase current in Amps. Default value is 500.0
-    N_PHASE : float
-        Number of motor phases. Default value is 3.0
-    KAPPA : float
-        Ratio of Base speed to max speed. Default value is 0.6
-    L_D_RATIO : float
-        Length to diameter ratio of motor. Default value is 1.5
-    A_S : float
-        Electrical loading of total stator current flowing per unit circumference in A/m.
-        Default value is 95000.0
-    r_d : float
-        D-axis resistance per motor phase at very high speed (short circuit). Default value is 0.4
-    resistance : float
-        Resistance of Stator in Ohms. Default value is 0.0
-    inductance : float
-        Motor inductance in Henrys. Default value is 0.0
+        output Torque from motor (N*m)
+    pole_pairs : float
+        Number of pole pairs in motor
+    I0 : float
+        motor No-load Current (A)
+    max_current : float
+        max motor phase current (A)
+    max_torque : float
+        maximum possible torque for motor (N*m)
+    power_iron_loss : float
+        total power loss due to iron core (W)
+    power_mech : float
+        mechanical power output of motor (W)
+    power_windage_loss : float
+        friction loss from motor operation (W)
+    winding_resistance : float
+        total resistance of copper winding (ohm)
+    torque : float
+        torque at max_rpm (N*m)
 
-    Returns
+    Outputs
     -------
-    tmax : float
-        Maximum possible torque for the motor in N*m. Default value is 0.0
-    k_v : float
-        Motor voltage/back emf constant (Voltage/speed) in V/(rad/s). Default value is 0.1
-    k_t : float
-        Motor torque constant (Torque/Current) in N*m/A. Default value is 10.0
-    d2l : float
-        D-squared*L parameter which is proportional to Torque in mm^3. Default value is 0.0
-    d2l_ft : float
-        D-squared*L parameter converted to ft^3. Default value is 0.0
-    d_base : float
-        Base 8000hp diameter for scaling purposes in m.  Default value is 0.48
-    weight : float
-        Weight of motor in kg. Default value is 0.0
+    current : float
+        current through motor (A)
+    voltage : float
+        voltage across motor in (V)
     phase_current : float
-        Phase current for AC current in Amps. Default value is 0.0
+        phase current through motor (A)
     phase_voltage : float
-        AC voltage across motor in Volts. Default value is 500.0
+        phase voltage across motor (V)
     frequency : float
-        Frequency of Electric output waveform in Hz. Default value is 60.0
-    phase : float
-        phase offset between Current and Voltage. Default value is 0.0
-
-    Notes
-    -----
-
+        Frequency of electric output waveform (Hz)
+    power_input : float
+        total required power input into motor
+    
     References
     ----------
     [1] "J. Gladin, K. Ali, K. Collins, "Conceptual Modeling of Electric and Hybrid-Electric
@@ -80,215 +286,88 @@ class ElectricMotor(Component):
     """
 
     def __init__(self):
-        super(ElectricMotor, self).__init__()
-
-        # Inputs/Params
-        self.add_param('torque',
-                       val=310.35 * 0.737,
-                       desc='Output torque',
-                       units='N*m')
-        self.add_param('max_rpm',
-                       val=2500.0,
-                       desc='max rpm of motor',
-                       units='rpm')
-        self.add_param('design_power',
-                       val=0.00938 / 746.0,
-                       desc='Design value of motor',
-                       units='hp')
-        self.add_param('speed',
-                       val=1900.0,
-                       desc='Output shaft mechanical speed',
-                       units='rpm')
-        self.add_param('POLE_PAIRS',
-                       val=6.0,
-                       desc='Number of pole pairs in motor',
-                       units='none')
-        self.add_param('i0', val=0.0, desc='Motor No-load current', units='A')
-        self.add_param('i0_des',
-                       val=0.0,
-                       desc='Motor No-load Current at Nbase',
+        super(Motor, self).__init__()
+        self.deriv_options['type'] = 'fd'
+        self.add_param('max_current',
+                       val=42.0,
+                       desc='max operating current',
                        units='A')
-        self.add_param('imax',
-                       val=450.0,
-                       desc='Max motor phase current',
+        self.add_param('I0',
+                       val=40.0,
+                       desc='motor no load current',
                        units='A')
-        self.add_param('N_PHASE',
+        self.add_param('n_phases',
                        val=3.0,
-                       desc='Number of motor phases',
-                       units='none')
-        self.add_param('KAPPA',
-                       val=0.5,
-                       desc='Base speed/max speed',
-                       units='none')
-        self.add_param('L_D_RATIO',
-                       val=0.83,
-                       desc='Length to diameter ratio of motor',
-                       units='none')
-        self.add_param('r_d',
-                       val=0.4,
-                       desc='D-axis resistance per motor phase at very high speed (short circuit)',
-                       units='ohm')
-        self.add_param('A_S',
-                       val=95000.0,
-                       desc='Electrical loading of total stator current flowing per unit circumference',
-                       units='A/m')
-        self.add_param('resistance',
-                       val=0.0,
-                       desc='Resistance of Stator',
-                       units='ohm')
-        self.add_param('inductance',
-                       val=0.0,
-                       desc='Motor inductance',
-                       units='H')
-        # Desired outputs
-        self.add_output('pmax',val=0.0,desc='MaxPower',units='W')
-        self.add_output('wmax',val=0.0,desc='max rotational speed',units='rad/s')
-        self.add_output('tmax', val=0.0, desc='MaxTorque', units='N*m')
-        self.add_output('k_v',
-                        val=0.1,
-                        desc='Motor voltage/back emf constant (Speed/volt)',
-                        units='rad/s/V')
-        self.add_output('k_t', val=10.0, desc='Motor torque constant (Torque/amp)', units='N*m/A')
-        self.add_output('d2l',
-                        val=0.0,
-                        desc='D-squared*L parameter which is ~ to Torque',
-                        units='mm**3')
-        self.add_output('d2l_ft',
-                        val=0.0,
-                        desc='D-squared*L parameter converted to ft^3',
-                        units='ft**3')
-        self.add_output('d_base',
-                        val=0.48,
-                        desc='Base 8000hp diameter for scaling purposes',
-                        units='m')
-        self.add_output('l_base',
-                        val=0.0,
-                        desc='motor length',
-                        units='m')
-        self.add_output('weight', val=0.0, desc='Weight of motor', units='kg')
-        self.add_output('phase_current',
-                        val=0.0,
-                        desc='Phase current',
-                        units='A')
-        self.add_output('phase_voltage',
-                        val=500.0,
-                        desc='AC voltage across motor',
-                        units='V')
-        self.add_output('frequency',
-                        val=60.0,
-                        desc='Frequency of Electric output waveform',
-                        units='Hz')
-        self.add_output('phase',
-                        val=0.0,
-                        desc='phase offset between Current and Voltage',
-                        units='rad')
-
+                       desc='number of motor power phases',
+                       units='unitless')
+        self.add_param('w_operating', 0.0, desc='operating speed of motor', units='rad/s')
+        self.add_param('pole_pairs',
+                       val=6.0,
+                       desc='number of motor pole_pairs',
+                       units='unitless')
+        self.add_param('torque', val=1.0, desc='torque at max_rpm', units='N*m')
+        self.add_param('winding_resistance', 0.0, desc='total resistance of copper winding', units='ohm')
+        self.add_param('power_windage_loss', 0.0, desc='friction loss from motor operation', units='W')
+        self.add_param('power_mech', 0.0, desc='mechanical power output of motor', units='W')
+        self.add_param('power_iron_loss', 0.0, desc='total power loss due to iron core', units='W')
+        self.add_param('max_torque', val=0.0, desc='maximum possible torque for the motor', units='N*m')
+        
+        self.add_output('current', val=2.0, desc='current through motor', units='A')
+        self.add_output('phase_current', val=1.0, desc='phase current through motor', units='A')
+        self.add_output('voltage', val=500.0, desc='voltage through motor', units='V')
+        self.add_output('phase_voltage', val=1.0, desc='phase voltage through motor', units='V')
+        self.add_output('frequency', val=60.0, desc='frequency of electric output waveform', units='Hz')
+        self.add_output('power_input', 1.0, desc='total required power input into motor', units='W')
 
     def solve_nonlinear(self, params, unknowns, resids):
+        # voltage constant
+        k_v = (params['max_current'] - params['I0']) / params['max_torque'] * 30.0 / np.pi
+        # torque constant
+        k_t = 30.0 / np.pi * 1.0 / k_v
 
-        #Calculating tmax
-        unknowns['pmax'] = params['design_power'] * 746.0
-        unknowns['wmax'] = params['max_rpm'] * 2 * numpy.pi / 60.0
-        unknowns['tmax'] = unknowns['pmax']/(params['KAPPA']*unknowns['wmax'])
-        tmax = unknowns['tmax']
-
-        #Calculating motor constants
-        unknowns['k_v'] = ((params['imax'] - params['i0_des']) / tmax) * (30.0 / numpy.pi)  # A/(N*m)
-        unknowns['k_t'] = (1.0 / unknowns['k_v']) * (30.0 / numpy.pi)  #
-
-        #Calculating sizing
-        L_D_RATIO = params['L_D_RATIO']
-        unknowns['d2l'] = 293722.0 * (tmax ** 0.7592)  # mm^3
-        d2l = unknowns['d2l']
-        unknowns['d2l_ft'] = d2l * 3.53147 * (10 ** -8)  # ft^3
-        unknowns['d_base'] = ((d2l / L_D_RATIO) ** (1.0 / 3.0)) / 1000.0  # m
-        unknowns['l_base'] = unknowns['d_base']*L_D_RATIO
-
-        #Calculating weight
-        unknowns['weight'] = 0.0000070646 * (d2l ** 0.9386912061) #relation in GT paper (Figure 6)
-
-        #Calculating phase current, phase voltage, frequency, and phase
-        unknowns['phase_current'] = self.phase_current_calc(unknowns,params,resids)
-        unknowns['phase_voltage'] = self.phase_voltage_calc(unknowns,params,resids)
-        unknowns['frequency'] = params['speed'] * params['POLE_PAIRS'] / 60.0
-        unknowns['phase'] = self.phase_calc(unknowns,params,resids)
-
-
-    def phase_current_calc(self,unknowns,params,resids):
-        # Calculates Current from equation 5 in paper and converts to phase current
-        t = unknowns['pmax'] / unknowns['wmax']  # W/(rad/s) = (N*m/s)/(rad/s) = N*m
-        current = params['i0'] + t / unknowns['k_t']  # A + (N*m)/(N*m/A)
-        phase_current = current / params['N_PHASE']  # A
-        return phase_current
-
-    def phase_voltage_calc(self,unknowns,params,resids):
-        # Calculates Voltage from equation 6 in paper and converts to phase voltage
-        imax = params['imax']
-        N_PHASE = params['N_PHASE']
-        k_v = unknowns['k_v']
-        d_base = unknowns['d_base']
-        phase_current = unknowns['phase_current']
-
-        w = params['speed']*2*numpy.pi/60.0 #RPM to rad/s
-        w_base = params['KAPPA']*params['max_rpm']*2*numpy.pi/60.0 #rpm to rad/s
-        turns = params['A_S']*numpy.pi*d_base/imax/N_PHASE/2.0 #number of coil turns required
-        r_per_km = 48.8387296964863*imax**(-1.00112597971171)
-        l_wind = d_base*numpy.pi
-        r_turn = l_wind*r_per_km/1000.0 #total resistance per turn
-
-        if w > w_base:
-            r_eq = r_turn*turns + params['r_d']*(1-w/w_base)**2
-            voltage = (phase_current*N_PHASE)*r_eq + w/k_v
-        elif w < w_base:
-            r_eq = r_turn*turns
-            voltage = (phase_current*N_PHASE)*r_eq + w/k_v
-        phase_voltage = voltage * numpy.sqrt(3.0 / 2.0)
-        return phase_voltage
-
-    def phase_calc(self, unknowns,params,resids):
-        speed = params['speed']
-        k_v = unknowns['k_v']
-
-        k_t = .73756214837 / k_v
-        frequency = speed * params['POLE_PAIRS'] / (2 * numpy.pi)
-        current = params['torque'] / k_t
-        resistor_voltage = current * params['resistance']
-        inductor_impedance = frequency * params['inductance']
-        inductor_voltage = current * inductor_impedance
-        speed_voltage = k_v * speed
-        real_voltage = speed_voltage + resistor_voltage
-        phase = numpy.arctan2(inductor_voltage, real_voltage)
-        return phase
+        # Calculating phase current, phase voltage, frequency, and phase
+        unknowns['current'] = params['I0'] + params['torque'] / k_t
+        power_copper_loss = np.power(unknowns['current'], 2.0) * params['winding_resistance']
+        unknowns['power_input'] = params['power_mech'] + params['power_windage_loss'] + params['power_iron_loss'] + power_copper_loss
+        
+        unknowns['current'] = params['I0'] + params['torque'] / k_t
+        unknowns['phase_current'] = unknowns['current'] / params['n_phases']
+        
+        unknowns['voltage'] = unknowns['current'] * params['winding_resistance'] + params['w_operating'] / (k_v * np.pi / 30.0)
+        unknowns['phase_voltage'] = unknowns['voltage'] * np.sqrt(3.0 / 2.0)
+        
+        unknowns['frequency'] = params['w_operating'] / np.pi * params['pole_pairs'] / 60.0
 
 
 if __name__ == '__main__':
-    root = Group()
-    prob = Problem(root)
-    prob.root.add('comp', ElectricMotor())
+    from openmdao.api import SqliteRecorder
+    from os import remove
+    from sqlitedict import SqliteDict
+
+    prob = Problem()
+    prob.root = MotorGroup()
+    # prob.root.add('Indep_I0', IndepVarComp('I0_input', 0.0))
+    prob.root.add('init_vars', IndepVarComp('max_current', 42.0, units='A'), promotes=['max_current'])
+
+    rec = SqliteRecorder('drivetraindb')
+    rec.options['record_params'] = True
+    rec.options['record_metadata'] = True
+    prob.driver.add_recorder(rec)
+
     prob.setup()
+    prob.root.list_connections()
+    prob.print_all_convergence()
+
+    # view_tree(prob)
     prob.run()
 
-    # Printing various input parameters
-    print('kappa: %f' % prob['comp.KAPPA'])
-    print('imax [A]: %f' % prob['comp.imax'])
-    print('Max RPM: %f' % prob['comp.max_rpm'])
-    print('Design Power [hp]: %f' % prob['comp.design_power'])
-    print('LD Ratio:%f' % prob['comp.L_D_RATIO'])
-    print('I0 [A]: %f' % prob['comp.i0'])
-    print('Torque [N*m]: %f' % prob['comp.torque'])
+    db = SqliteDict('drivetraindb', 'openmdao')
+    # p# print(db.keys())
+    # data = db['rank0:Driver/1']
+    # p# print(data['Parameters'])
+    # p# print(data['Unknowns'])
 
-    print('-----------------------------')
 
-    # Outputs
-    print('Max Torque [N*m]: %f' % prob['comp.tmax'])
-    print('Kv [rad/s/V]: %f' % prob['comp.k_v'])
-    print('Kt [N-m/A]: %f' % prob['comp.k_t'])
-    print('Motor Size (D^2*L) [mm^3]: %f ' % prob['comp.d2l'])
-    print('Motor Size (D^2*L) [ft^3]: %f ' % prob['comp.d2l_ft'])
-    #print('Diameter [m]: %f ' %prob['comp.d_base'])
-    #print('Length [m]: %f ' %prob['comp.l_base'])
-    print('Motor Weight [kg]: %f ' % prob['comp.weight'])
-    print('Phase Current [A]: %f' % prob['comp.phase_current'])
-    print('Phase Voltage [V]: %f' % prob['comp.phase_voltage'])
-    print('Frequency [Hz]: %f ' % prob['comp.frequency'])
-    print('Phase: %f' % prob['comp.phase'])
+
+    prob.cleanup()
+    remove('drivetraindb')
